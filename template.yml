@@ -1,0 +1,253 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+###
+## Parameters
+Parameters:
+  ProjectPrefix:
+    Type: String
+    Default: 'markus-dev'
+    Description: 'Project prefix for resource naming'
+###
+## Resources
+Resources:
+  ###
+  # Create a S3 bucket
+  ResultsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ProjectPrefix}-athena-results'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+
+  OutputBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ProjectPrefix}-website'
+      AccessControl: PublicRead
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: error.html
+
+  ###
+  # Create an AWS Athena workGroup
+  AthenaWorkGroup:
+    DependsOn: ResultsBucket
+    Type: AWS::Athena::WorkGroup
+    Properties:
+      Name: !Sub '${ProjectPrefix}-athena-workgroup'
+      State: ENABLED
+      WorkGroupConfiguration:
+        EnforceWorkGroupConfiguration: false
+        PublishCloudWatchMetricsEnabled: false
+        ResultConfiguration:
+          OutputLocation: !Join [ "", ["s3://", !Ref ResultsBucket] ]
+
+  ###
+  # Create a Step Functions state machine
+  AthenaStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      RoleArn: !GetAtt AthenaWorkflowExecutionRole.Arn
+      DefinitionString:
+        !Sub
+        - |-
+          {
+              "StartAt": "Validate",
+              "States": {
+                "Validate": {
+                  "Type": "Map",
+                  "InputPath": "$.detail",
+                  "ItemsPath": "$.queries",
+                  "Parameters": {
+                    "params.$": "$$.Map.Item.Value",
+                    "outputBucket.$": "$.outputBucket" 
+                  },
+                  "Iterator": {
+                    "StartAt": "Start an Athena query",
+                    "States": {
+                      "Start an Athena query": {
+                        "Resource": "arn:${AWS::Partition}:states:::athena:startQueryExecution.sync",
+                        "Parameters": {
+                          "QueryString.$": "$.params.query",
+                          "WorkGroup": "${workgroup}"
+                        },
+                        "ResultPath": "$.taskresult",
+                        "Type": "Task",
+                        "Next": "Parse publishing parameters"
+                      },
+                      "Parse publishing parameters": {
+                        "Type": "Pass",
+                        "Parameters": {
+                          "key.$": "States.ArrayGetItem(States.StringSplit($.taskresult.QueryExecution.ResultConfiguration.OutputLocation, '/'), 2)",
+                          "bucket.$": "States.ArrayGetItem(States.StringSplit($.taskresult.QueryExecution.ResultConfiguration.OutputLocation, '/'), 1)",
+                          "outputBucket.$": "$.outputBucket",
+                          "outputObject.$": "$.params.outputObject"
+                        },
+                        "Next": "Publish dataset"
+                      },
+                      "Publish dataset": {
+                        "Type": "Task",
+                        "ResultPath": "$.taskresult",
+                        "Resource": "arn:aws:states:::aws-sdk:s3:copyObject",
+                        "Parameters": {
+                          "Bucket.$": "$.outputBucket",
+                          "Key.$": "$.outputObject",
+                          "CopySource.$": "States.Format('{}/{}', $.bucket, $.key)"
+                        },
+                        "Next": "Set result object ACL"
+                      },
+                      "Set result object ACL": {
+                        "Type": "Task",
+                        "Comment": "Using Lambda for S3 ACL as SF S3 SDK integration didn't work as expected.",
+                        "Resource": "${lambda}",
+                        "Parameters": {
+                          "Bucket.$": "$.outputBucket",
+                          "Key.$": "$.outputObject"
+                        },
+                        "End": true
+                      }
+                    }
+                  },
+                "End": true
+                }
+              }
+            }
+        - {workgroup: !Ref AthenaWorkGroup, lambda: !GetAtt LambdaFunction.Arn}
+  
+  AthenaWorkflowExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: "sts:AssumeRole"
+      Path: "/"
+      Policies:
+        - PolicyName: AthenaPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: !GetAtt LambdaFunction.Arn
+              - Effect: Allow
+                Action:
+                  - athena:getQueryResults
+                  - athena:startQueryExecution
+                  - athena:stopQueryExecution
+                  - athena:getQueryExecution
+                  - athena:getDataCatalog
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:athena:${AWS::Region}:${AWS::AccountId}:workgroup/${AthenaWorkGroup}"
+                  - !Sub "arn:${AWS::Partition}:athena:${AWS::Region}:${AWS::AccountId}:datacatalog/*"
+              - Effect: Allow
+                Action:
+                  - s3:GetBucketLocation
+                  - s3:GetObject
+                  - s3:ListBucket
+                  - s3:ListBucketMultipartUploads
+                  - s3:ListMultipartUploadParts
+                  - s3:AbortMultipartUpload
+                  - s3:CreateBucket
+                  - s3:PutObject
+                Resource: !Sub "arn:${AWS::Partition}:s3:::*"
+              - Effect: Allow
+                Action:
+                  - glue:CreateDatabase
+                  - glue:GetDatabase
+                  - glue:GetDatabases
+                  - glue:UpdateDatabase
+                  - glue:DeleteDatabase
+                  - glue:CreateTable
+                  - glue:UpdateTable
+                  - glue:GetTable
+                  - glue:GetTables
+                  - glue:DeleteTable
+                  - glue:BatchDeleteTable
+                  - glue:BatchCreatePartition
+                  - glue:CreatePartition
+                  - glue:UpdatePartition
+                  - glue:GetPartition
+                  - glue:GetPartitions
+                  - glue:BatchGetPartition
+                  - glue:DeletePartition
+                  - glue:BatchDeletePartition
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:database/*"
+                  - !Sub "arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:table/*"
+                  - !Sub "arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:catalog"
+
+  LambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${LambdaFunction}'
+      RetentionInDays: 7
+
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:PutObjectAcl
+                Resource: '*'
+
+# for now, Lambda sets result object's ACL
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Description: 'aws:states:opt-in'
+      Role: !GetAtt LambdaRole.Arn
+      Runtime: python3.9
+      Timeout: 10
+      Code:
+        ZipFile: |
+          import logging
+          import boto3
+
+          LOGGER = logging.getLogger(__name__)
+          LOGGER.setLevel(logging.INFO)
+
+          client = boto3.client('s3')
+
+          def handler(event, context):
+            LOGGER.info(event)
+            
+            bucket_name=event['Bucket']
+            object_name=event['Key']
+
+            response = client.put_object_acl(
+              ACL='public-read',
+              Bucket=bucket_name,
+              Key=object_name
+            )

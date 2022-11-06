@@ -1,0 +1,10 @@
+{
+  "detail": {
+    "outputBucket": "markus-dev-hinnat-website",
+    "queries": [
+      { "outputObject": "vihannekset.csv", "query": "SELECT * FROM items WHERE store='PRISMA KALEVA' AND name IN ('TOMAATTI SUOMI','KURKKU','PUNASIPULI IRTO','PARSAKAALI','AVOKADOPUSSI')ORDER BY name, date" },
+      { "outputObject": "viljatuotteet.csv", "query": "SELECT * FROM items WHERE store='PRISMA KALEVA' AND name IN ('PKARKEA VEHNÄJAUHO', 'GRAHAMJAUHO', 'PÄHKINÄ&HEDELMÄ MYSLI', 'RUISPUIKULAT', 'MYSLI') ORDER BY name, date" },
+      { "outputObject": "maitotuotteet.csv", "query": "SELECT * FROM items WHERE store='PRISMA KALEVA' AND name IN ('MAITOJUOMA LAKTON RASVATO', 'PEHMEÄ MAITORAHKA', 'PIZZAJUUSTORAASTE', 'OLTERMANNI KERMAJ. 17%', 'RUOKAKERMA 15% LAKTON') ORDER BY name, date" }
+    ]
+  }
+}
